@@ -30,7 +30,7 @@ from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 
 from airflow.providers.amazon.aws.operators.redshift_sql import RedshiftSQLOperator
 from airflow.providers.amazon.aws.transfers.s3_to_redshift import S3ToRedshiftOperator
-
+from airflow.providers.amazon.aws.operators.sns import SnsPublishOperator
 
 
 import pandas as pd
@@ -53,6 +53,20 @@ FAILED_DOWNLOAD_CSV = 'Failed to download CSV file. Status code:'
 
 BUCKET_S3_FILE_KEY = 'BUCKET_S3_FILE_KEY'
 
+NEW_NAME_DOWNLOAD_FROM_S3 = 's3_downloaded_file.csv'
+
+SNS_TOPIC_ARN = "arn:aws:sns:us-east-2:694619293848:data_engineer_email_topic"
+
+REDSHIFT_TABLE = 'income'
+
+REDSHIFT_SCHEMA = 'public'
+
+SNS_SUCCESSFUL_MESSAGE = f" Download and Upload processing taks was finalized, copied information on RedSfhit DataBase: {REDSHIFT_SCHEMA} in Table: {REDSHIFT_TABLE}"
+
+FILTER_CSV_FILE_NAME = 'filter_process_file.csv'
+
+FILE_TO_UPLOAD = 'FILE_TO_UPLOAD'
+
 dag_owner = ''
 
 default_args = {'owner': dag_owner,
@@ -73,6 +87,13 @@ with DAG(
 
     start = EmptyOperator(task_id='start')
     
+    def get_random_filename(file_name):
+         suffix = datetime.now().strftime("%y%m%d_%H%M%S")
+         filename = "_".join([file_name, suffix])            
+         filename = filename.replace('.csv', '')    
+         
+         return filename
+    
     
     def download_csv_file(url, save_address, file_name, **kwargs):
         try:
@@ -84,9 +105,8 @@ with DAG(
             response = requests.get(url)
          
             if response.status_code == 200:
-               # Save the content of the response to a local CSV file
-               suffix = datetime.now().strftime("%y%m%d_%H%M%S")
-               filename = "_".join([file_name, suffix])
+               # Save the content of the response to a local CSV file              
+               filename = get_random_filename(file_name)
             
                filename = filename.replace('.csv', '')
                file_address = save_address + os.sep + filename + '.csv'
@@ -102,7 +122,12 @@ with DAG(
                print(FAILED_DOWNLOAD_CSV, response.status_code)
 
             # Read the CSV file into a Pandas DataFrame
-            df = pd.read_csv(file_address)        
+            df = pd.read_csv(file_address)   
+                
+            kwargs['ti'].xcom_push(
+                    key = f"{FILE_TO_UPLOAD}", 
+                    value = [ filename + '.csv'],
+                )  
           
         except:
             raise Exception("Cannot read CSV file")
@@ -112,19 +137,13 @@ with DAG(
         bucket_name = AWS_S3_STORE_BUCKET_NAME# Your GCS bucket name
         aws_conn_id = 'aws_default'
 
-        # List all CSV files in the data folder
-        # Note : you can filter the files extentions with file.endswith('.csv')
-        # Examples : file.endswith('.csv')
-        #            file.endswith('.json')
-        #            file.endswith('.csv','json')
-
-        #print(f"File location using __file__ variable: {os.path.realpath(os.path.dirname(__file__))}")      
-
-
         if not (os.path.exists(data_folder)):
             print(f"Not  exits address in {data_folder}")
         else:
-            csv_files = [file for file in os.listdir(data_folder) if file.endswith('.csv') or file.endswith('.json') ]
+            csv_files = kwargs['ti'].xcom_pull( key = 'FILE_TO_UPLOAD')
+            
+            if  csv_files is None or len(csv_files) == 0:
+                csv_files = [file for file in os.listdir(data_folder) if file.endswith('.csv') ]
 
             
             for csv_file in csv_files:
@@ -143,15 +162,7 @@ with DAG(
                 # for uploading files from a local filesystem to a GCS bucket.
                 #
                 ###################################################################
-                
-               #  with open(local_file_path, 'rb') as data: 
-               #    create_object = S3CreateObjectOperator(
-               #          task_id="s3_create_object",
-               #          s3_bucket = bucket_name,
-               #          s3_key= csv_file,
-               #          data = data,
-               #          replace=True,
-               #       )
+
                 create_local_to_s3_job = LocalFilesystemToS3Operator(
                      task_id  =  "create_local_to_s3_job",
                      filename =  local_file_path,
@@ -186,11 +197,54 @@ with DAG(
         downloaded_file_path = '/'.join(downloaded_file_name[0].split('/')[:-1])
         os.rename(src = downloaded_file_name[0], dst = f"{downloaded_file_path}/{new_name}")
         
-    task_rename_s3_download_file = PythonOperator(
-        task_id='task_rename_s3_download_file',
+   
+    def process_and_filter_download_file():
+       
+        file_path = DATASET_ADDRESS + os.sep + NEW_NAME_DOWNLOAD_FROM_S3
+       
+        if os.path.exists(file_path): #If exist file
+           
+           #Transform to PandasData frame and filter
+           df = pd.read_csv(file_path)
+           
+           df["Period_Year"] = pd.to_datetime(df["Period"], format = "%Y.%m").dt.strftime('%Y')
+           
+           df_filter = df[df['Period_Year'].between('2005', '2020')]   
+           
+           df_filter = df[df['Data_value'] >= 200]
+           
+           print(f"Dataset size {df.size} and Filter Dataset {df_filter.size}")
+           
+           new_filter_name =  FILTER_CSV_FILE_NAME
+           
+           new_filter_file_path = DATASET_ADDRESS + os.sep + new_filter_name
+           
+           df_filter.to_csv(new_filter_file_path, encoding='utf-8', index=False)
+           
+           kwargs['ti'].xcom_push(
+                    key = f"{FILE_TO_UPLOAD}", 
+                    value = [new_filter_name],
+                ) 
+           
+           #Upload to  S3           
+           upload_to_aws_s3(DATASET_ADDRESS, AWS_S3_STORE_BUCKET_NAME)
+
+           return new_filter_file_path 
+                   
+      
+       #Save to RedShift directly or save to S3
+    
+    
+    process_and_filter_download_file_task = PythonOperator(
+        task_id='process_and_filter_download_file_task',
+        python_callable = process_and_filter_download_file,
+    )
+   
+    rename_s3_download_file_task = PythonOperator(
+        task_id='rename_s3_download_file_task',
         python_callable = rename_s3_download_file,
         op_kwargs = {
-            'new_name': 's3_downloaded_file.csv'
+            'new_name': NEW_NAME_DOWNLOAD_FROM_S3
         }
     )
    
@@ -207,10 +261,7 @@ with DAG(
     download_csv_task = PythonOperator(
         task_id="download_csv_task",
         python_callable = download_csv_file,
-        # op_kwargs: Optional[Dict] = None,
         op_args = [EXTERNAL_URL_CSV, DATASET_ADDRESS, BASE_FILENAME],
-        # templates_dict: Optional[Dict] = None
-        # templates_exts: Optional[List] = None
     )
     
     upload_to_aws_s3 = PythonOperator(
@@ -218,48 +269,15 @@ with DAG(
         python_callable = upload_to_aws_s3,
         op_args = [DATASET_ADDRESS, AWS_S3_STORE_BUCKET_NAME],
         provide_context = True,       
-     )
-    
-    setup__task_create_table = RedshiftSQLOperator(
-        task_id='setup__create_table',
-        sql="""
-            CREATE TABLE IF NOT EXISTS fruit (
-            fruit_id INTEGER,
-            name VARCHAR NOT NULL,
-            color VARCHAR NOT NULL
-            );
-        """,
-    )
-    
-    task_insert_data = RedshiftSQLOperator(
-        task_id='task_insert_data',
-        sql=[
-            "INSERT INTO fruit VALUES ( 1, 'Banana', 'Yellow');",
-            "INSERT INTO fruit VALUES ( 2, 'Apple', 'Red');",
-            "INSERT INTO fruit VALUES ( 3, 'Lemon', 'Yellow');",
-            "INSERT INTO fruit VALUES ( 4, 'Grape', 'Purple');",
-            "INSERT INTO fruit VALUES ( 5, 'Pear', 'Green');",
-            "INSERT INTO fruit VALUES ( 6, 'Strawberry', 'Red');",
-        ],
-    )
-    
-    task_get_all_table_data = RedshiftSQLOperator(
-        task_id='task_get_all_table_data', sql="CREATE TABLE more_fruit AS SELECT * FROM fruit;"
-    )
+     ) 
     
     
-    task_get_with_filter = RedshiftSQLOperator(
-        task_id='task_get_with_filter',
-        sql="CREATE TABLE filtered_fruit AS SELECT * FROM fruit WHERE color = '{{ params.color }}';",
-        params={'color': 'Red'},
-    )
-    
-    s3_to_redshift = S3ToRedshiftOperator(
-        task_id='s3_to_redshift',
-        schema='public',
-        table='income',
+    s3_to_redshift_task = S3ToRedshiftOperator(
+        task_id='s3_to_redshift_task',
+        schema = REDSHIFT_SCHEMA,
+        table = REDSHIFT_TABLE,
         s3_bucket = AWS_S3_STORE_BUCKET_NAME,
-        s3_key='csv_processing_241214_222149.csv',
+        s3_key = {FILTER_CSV_FILE_NAME},
         redshift_conn_id='redshift_default',
         aws_conn_id='aws_default',
         copy_options=[
@@ -268,8 +286,13 @@ with DAG(
         method='REPLACE'
     )
     
+    sns_publish_notified_task = SnsPublishOperator(
+        task_id = 'sns_publish_notified_task',
+        target_arn = SNS_TOPIC_ARN,
+        message = SNS_SUCCESSFUL_MESSAGE,
+)
+    
     end = EmptyOperator(task_id='end')
 
-    start >> download_csv_task >> upload_to_aws_s3 >> download_from_s3_task >> task_rename_s3_download_file >>  setup__task_create_table >> task_insert_data >> task_get_all_table_data >> task_get_with_filter >> s3_to_redshift >> end
+    start >>  download_csv_task >> upload_to_aws_s3 >> download_from_s3_task >> rename_s3_download_file_task >> process_and_filter_download_file_task >> s3_to_redshift_task >> end >> sns_publish_notified_task
     
-    #  
