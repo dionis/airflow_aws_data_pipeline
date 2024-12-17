@@ -34,13 +34,13 @@ from airflow.providers.amazon.aws.operators.sns import SnsPublishOperator
 
 
 import pandas as pd
+import numpy as np
 import os
 import requests
 import json
 
 EXTERNAL_URL_CSV = Variable.get('EXTERNAL_URL_CSV') if  Variable.get('EXTERNAL_URL_CSV', default_var = None) not in ['', None]  else 'https://www.stats.govt.nz/assets/Uploads/Balance-of-payments/Balance-of-payments-and-international-investment-position-June-2024-quarter/Download-data/balance-of-payments-and-international-investment-position-june-2024-quarter.csv'
 DATASET_ADDRESS = Variable.has_key('DATASET_ADDRESS').get('DATASET_ADDRESS') if  Variable.get('DATASET_ADDRESS', default_var = None) not in ['', None] else '/opt/airflow/datasets/'
-
 AWS_S3_STORE_BUCKET_NAME = Variable.get('AWS_S3_STORE_BUCKET_NAME') if  Variable.get('AWS_S3_STORE_BUCKET_NAME', default_var = None) not in ['', None]  else 'geekscastle-challenge'
 
 BASE_FILENAME = 'csv_processing'
@@ -63,7 +63,7 @@ REDSHIFT_SCHEMA = 'public'
 
 SNS_SUCCESSFUL_MESSAGE = f" Download and Upload processing taks was finalized, copied information on RedSfhit DataBase: {REDSHIFT_SCHEMA} in Table: {REDSHIFT_TABLE}"
 
-FILTER_CSV_FILE_NAME = 'filter_process_file.csv'
+FILTER_CSV_FILE_NAME = "filter_process_file.csv"
 
 FILE_TO_UPLOAD = 'FILE_TO_UPLOAD'
 
@@ -198,20 +198,20 @@ with DAG(
         os.rename(src = downloaded_file_name[0], dst = f"{downloaded_file_path}/{new_name}")
         
    
-    def process_and_filter_download_file():
+    def process_and_filter_download_file(**kwargs):
        
         file_path = DATASET_ADDRESS + os.sep + NEW_NAME_DOWNLOAD_FROM_S3
        
         if os.path.exists(file_path): #If exist file
            
            #Transform to PandasData frame and filter
-           df = pd.read_csv(file_path)
+           df = pd.read_csv(file_path)  
            
-           df["Period_Year"] = pd.to_datetime(df["Period"], format = "%Y.%m").dt.strftime('%Y')
-           
-           df_filter = df[df['Period_Year'].between('2005', '2020')]   
-           
-           df_filter = df[df['Data_value'] >= 200]
+           df["Period_Year"] = df['Period'].apply(np.int64) 
+
+           df_filter = df[df['Data_value'] >= 200]     
+                      
+           df_filter = df_filter.drop(columns=['Period_Year'])
            
            print(f"Dataset size {df.size} and Filter Dataset {df_filter.size}")
            
@@ -219,21 +219,26 @@ with DAG(
            
            new_filter_file_path = DATASET_ADDRESS + os.sep + new_filter_name
            
-           df_filter.to_csv(new_filter_file_path, encoding='utf-8', index=False)
+           df_filter.to_csv(new_filter_file_path, index=False) 
            
            kwargs['ti'].xcom_push(
                     key = f"{FILE_TO_UPLOAD}", 
                     value = [new_filter_name],
                 ) 
            
-           #Upload to  S3           
-           upload_to_aws_s3(DATASET_ADDRESS, AWS_S3_STORE_BUCKET_NAME)
-
-           return new_filter_file_path 
-                   
+           return new_filter_file_path                   
       
-       #Save to RedShift directly or save to S3
-    
+    def delete_files_in_directory(directory_path, **kwargs):
+        try:
+            files = os.listdir(directory_path)
+            for file in files:
+                file_path = os.path.join(directory_path, file)
+                
+                if os.path.isfile(file_path):
+                        os.remove(file_path)
+
+        except OSError:
+            print("Error occurred while deleting files.")
     
     process_and_filter_download_file_task = PythonOperator(
         task_id='process_and_filter_download_file_task',
@@ -264,28 +269,44 @@ with DAG(
         op_args = [EXTERNAL_URL_CSV, DATASET_ADDRESS, BASE_FILENAME],
     )
     
-    upload_to_aws_s3 = PythonOperator(
-        task_id = 'upload_to_aws_s3',
+    upload_to_aws_s3_task = PythonOperator(
+        task_id = 'upload_to_aws_s3_task',
         python_callable = upload_to_aws_s3,
         op_args = [DATASET_ADDRESS, AWS_S3_STORE_BUCKET_NAME],
         provide_context = True,       
      ) 
     
+    upload_to_aws_s3_filter_file_task = PythonOperator(
+        task_id = 'upload_to_aws_s3_filter_file_task',
+        python_callable = upload_to_aws_s3,
+        op_args = [DATASET_ADDRESS, AWS_S3_STORE_BUCKET_NAME],
+        provide_context = True,       
+     ) 
     
+    clean_process_directory_task = PythonOperator(
+        task_id = 'clean_process_directory_task',
+        python_callable = delete_files_in_directory,
+        op_args = [DATASET_ADDRESS],
+        provide_context = True,       
+     ) 
+     
+   
     s3_to_redshift_task = S3ToRedshiftOperator(
         task_id='s3_to_redshift_task',
         schema = REDSHIFT_SCHEMA,
         table = REDSHIFT_TABLE,
         s3_bucket = AWS_S3_STORE_BUCKET_NAME,
-        s3_key = {FILTER_CSV_FILE_NAME},
+        s3_key = FILTER_CSV_FILE_NAME,
+        #FILTER_CSV_FILE_NAME,  csv_processing_241216_233057.csv
         redshift_conn_id='redshift_default',
         aws_conn_id='aws_default',
         copy_options=[
-            "FORMAT AS CSV DELIMITER ',' QUOTE '\"' IGNOREHEADER 1 "
+            "FORMAT AS CSV DELIMITER ',' IGNOREHEADER 1 "
         ],
         method='REPLACE'
     )
     
+      #"FORMAT AS CSV DELIMITER ',' QUOTE '\"' IGNOREHEADER 1 "
     sns_publish_notified_task = SnsPublishOperator(
         task_id = 'sns_publish_notified_task',
         target_arn = SNS_TOPIC_ARN,
@@ -294,5 +315,4 @@ with DAG(
     
     end = EmptyOperator(task_id='end')
 
-    start >>  download_csv_task >> upload_to_aws_s3 >> download_from_s3_task >> rename_s3_download_file_task >> process_and_filter_download_file_task >> s3_to_redshift_task >> end >> sns_publish_notified_task
-    
+    start >>  download_csv_task >> upload_to_aws_s3_task >> download_from_s3_task >> rename_s3_download_file_task >> process_and_filter_download_file_task >> upload_to_aws_s3_filter_file_task >> s3_to_redshift_task >> clean_process_directory_task  >> end >> sns_publish_notified_task
