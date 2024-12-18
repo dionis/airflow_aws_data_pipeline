@@ -1,4 +1,4 @@
-### Project Description:
+# Project Description:
 
   Pipeline data using Apache Airflow
 
@@ -37,13 +37,13 @@
 
 1. Use an Airflow docker images for deploy the pipeline. For more information [check](https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html).
 
-1. It is necessary a AWS user and obtain the access:  
+1. It is necessary a AWS user and obtain the access key:  
 
    - AWS_SECRET_ACCES_KEY
    - AWS_ACCESS_KEY_ID
    - AWS_DEFAULT_REGION
 
-    Get the IAM user values associated and copy in docker-compose environement variables
+    Get the IAM user values associated and copy in docker-compose.yaml environment variables
 
 1. Was created a S3 bucket for same user in AWS. You must create a S3 Bucket and defined the airflow variable AWS_S3_STORE_BUCKET_NAME.
 
