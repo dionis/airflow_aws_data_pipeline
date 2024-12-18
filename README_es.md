@@ -80,5 +80,5 @@ Es un requerimiento el nombre de la tabla `income`, con el esquema public.
 
 1. Fue creado un notifiador de tipo Amazon Simple Notification Service (Amazon SNS) para enviakr un email, se se desea recibir las notificaciones cuando el pipeline del workflow ha terminado contacte al equipo de desarrollo.  
     
-    ![image](doc/image/sns_aws_topic.png).
+    ![image](doc/image/sns_aws_topic.png)
 
