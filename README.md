@@ -73,8 +73,7 @@ You can get the table DDL in [table_ddl/income_table.sql](files/table_ddl.sql). 
       ![image](doc/image/redshift_cluster_database_table.png)
 1. For Airflow conection with the RedShift database you need create a **redshift_default** conection with your Redshift cluster information. For more information you cant [check this information](https://www.astronomer.io/docs/learn/airflow-redshift/). Also, you need configure the RedShift cluster database for permit external conection. For more information [check in post](https://docs.bigeye.com/docs/redshift).
 
-1. Was created an Amazon Simple Notification Service (Amazon SNS) notificator for send email, if you want 
-received notification when workflow (pipeline) finalized, contact to developer team.
+1. Was created an Amazon Simple Notification Service (Amazon SNS) notificator for send email, if you want received notification when workflow (pipeline) finalized, contact to developer team.
 
     ![image](doc/image/sns_aws_topic.png)
 
